@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 
 REDIRECT_URI = "http://localhost:3000"
-SCOPES = "clips:edit user:read:chat user:write:chat"
+SCOPES = "clips:edit user:read:chat user:write:chat moderator:manage:announcements"
 TOKEN_FILE = Path(__file__).with_name("tokens.json")
 
 

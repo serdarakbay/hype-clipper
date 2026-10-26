@@ -14,7 +14,7 @@ import time
 import requests
 from dotenv import load_dotenv
 
-from detector import HypeDetector
+from detector import HypeDetector, tier_for_score
 import overlay as obs_overlay
 
 
@@ -50,6 +50,46 @@ def get_broadcaster_id(channel, headers):
     return users[0]["id"]
 
 
+def get_authenticated_user(headers):
+    """Get the channel owner represented by the saved user access token."""
+    response = requests.get(f"{API}/users", headers=headers, timeout=30)
+    response.raise_for_status()
+    users = response.json().get("data", [])
+    if not users:
+        raise SystemExit("Twitch did not return the authenticated user")
+    return users[0]
+
+
+def send_chat_message(owner_id, message, headers, reply_parent_message_id=None):
+    body = {"broadcaster_id": owner_id, "sender_id": owner_id, "message": message}
+    if reply_parent_message_id:
+        body["reply_parent_message_id"] = reply_parent_message_id
+    response = requests.post(
+        f"{API}/chat/messages",
+        headers=headers,
+        json=body,
+        timeout=30,
+    )
+    if not response.ok:
+        print(f"Chat reply failed (HTTP {response.status_code}): {response.text}")
+        return
+    body = response.json()
+    if body.get("data") and not body["data"][0].get("is_sent", True):
+        print(f"Chat reply was not sent: {json.dumps(body)}")
+
+
+def send_announcement(owner_id, message, headers):
+    response = requests.post(
+        f"{API}/chat/announcements",
+        headers=headers,
+        params={"broadcaster_id": owner_id, "moderator_id": owner_id},
+        json={"message": message, "color": "purple"},
+        timeout=30,
+    )
+    if not response.ok:
+        print(f"Announcement failed (HTTP {response.status_code}): {response.text}")
+
+
 def create_clip(broadcaster_id, title, headers):
     response = requests.post(
         f"{API}/clips",
@@ -70,16 +110,25 @@ def create_clip(broadcaster_id, title, headers):
 
 
 def parse_privmsg(line):
-    """Return (login, message) for an IRC PRIVMSG, or None for other lines."""
+    """Return (channel, login, message, message_id) for an IRC PRIVMSG, or None."""
+    tags = {}
+    if line.startswith("@"):
+        raw_tags, line = line.split(" ", 1)
+        for pair in raw_tags[1:].split(";"):
+            key, separator, value = pair.partition("=")
+            if separator:
+                tags[key] = value
     if " PRIVMSG " not in line:
         return None
     prefix, payload = line.split(" PRIVMSG ", 1)
     if " :" not in payload:
         return None
-    return prefix.split("!", 1)[0].lstrip(":"), payload.split(" :", 1)[1]
+    channel = payload.split(" ", 1)[0].lstrip("#").casefold()
+    user = prefix.split("!", 1)[0].lstrip(":")
+    return channel, user, payload.split(" :", 1)[1], tags.get("id")
 
 
-def connect_chat(channel):
+def connect_chat(*channels):
     context = ssl.create_default_context()
     raw_sock = socket.create_connection((CHAT_HOST, CHAT_PORT), timeout=15)
     try:
@@ -89,7 +138,9 @@ def connect_chat(channel):
         raise
     sock.settimeout(1)
     nick = f"justinfan{secrets.randbelow(900000) + 100000}"
-    sock.sendall(f"NICK {nick}\r\nJOIN #{channel}\r\n".encode("utf-8"))
+    commands = ["CAP REQ :twitch.tv/tags", f"NICK {nick}"]
+    commands.extend(f"JOIN #{channel}" for channel in dict.fromkeys(channels))
+    sock.sendall(("\r\n".join(commands) + "\r\n").encode("utf-8"))
     return sock
 
 
@@ -103,14 +154,22 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Detect hype without creating clips")
     parser.add_argument("--record", action="store_true", help="Append chat messages to a JSONL file")
     parser.add_argument("--overlay", action="store_true", help="Serve the OBS overlay on localhost:8765")
+    parser.add_argument("--announce", action="store_true", help="Announce clip moments in your own channel")
     args = parser.parse_args()
     channel = args.channel.lstrip("#").lower()
 
-    headers = None
+    client_id, access_token = get_auth()
+    headers = {"Authorization": f"Bearer {access_token}", "Client-Id": client_id}
+    try:
+        owner = get_authenticated_user(headers)
+    except requests.RequestException as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        raise SystemExit(f"Could not look up authenticated Twitch user: {detail}") from exc
+    owner_id = owner["id"]
+    owner_login = owner["login"].casefold()
+
     broadcaster_id = None
     if not args.dry_run:
-        client_id, access_token = get_auth()
-        headers = {"Authorization": f"Bearer {access_token}", "Client-Id": client_id}
         try:
             broadcaster_id = get_broadcaster_id(channel, headers)
         except requests.RequestException as exc:
@@ -126,6 +185,8 @@ def main():
 
     started_at = time.time()
     detector = HypeDetector(started_at)
+    session_clips = []
+    last_command_reply = {"clips": float("-inf"), "hype": float("-inf")}
     next_status = started_at + STATUS_INTERVAL
     stop_status = threading.Event()
     status_thread = None
@@ -160,6 +221,23 @@ def main():
                     clip_url, clip_error = create_clip(broadcaster_id, title, headers)
                 except requests.RequestException as exc:
                     clip_error = exc.response.text if exc.response is not None else str(exc)
+                if clip_url:
+                    session_clips.append({"tier": trigger.tier, "url": clip_url})
+
+            if args.announce:
+                level = {"NICE": 1, "GREAT": 2, "INSANE": 3, "LEGENDARY": 4}.get(trigger.tier, 1)
+                if args.dry_run:
+                    announcement = f"⚡ LEVEL {level} {trigger.tier} moment detected (dry run)"
+                elif clip_url:
+                    announcement = f"⚡ LEVEL {level} {trigger.tier} moment clipped! {clip_url}"
+                else:
+                    announcement = None
+                if announcement:
+                    try:
+                        send_announcement(owner_id, announcement, headers)
+                    except requests.RequestException as exc:
+                        detail = exc.response.text if exc.response is not None else str(exc)
+                        print(f"Announcement failed: {detail}")
 
             event = {
                 "title": f"{trigger.tier} moment",
@@ -188,8 +266,32 @@ def main():
                 flush=True,
             )
 
+    def handle_owner_command(message, message_id):
+        command = message.strip().casefold()
+        if command not in {"!clips", "!hype"}:
+            return
+        key = command[1:]
+        now = time.monotonic()
+        if now - last_command_reply[key] < 10:
+            return
+        last_command_reply[key] = now
+
+        if key == "clips":
+            recent = list(reversed(session_clips[-3:]))
+            reply = " | ".join(f"{clip['tier']} {clip['url']}" for clip in recent) if recent else "No clips yet"
+        else:
+            sample = detector.latest
+            tier = tier_for_score(sample.hype_score)
+            level = {"NICE": 1, "GREAT": 2, "INSANE": 3, "LEGENDARY": 4}.get(tier, 0)
+            reply = f"LEVEL {level} {tier or 'Building up'} · hype_score {sample.hype_score:.2f}"
+        try:
+            send_chat_message(owner_id, reply, headers, message_id)
+        except requests.RequestException as exc:
+            detail = exc.response.text if exc.response is not None else str(exc)
+            print(f"Chat reply failed: {detail}")
+
     try:
-        sock = connect_chat(channel)
+        sock = connect_chat(channel, owner_login)
         while True:
             now = time.time()
             completed = detector.advance_to(now)
@@ -223,10 +325,13 @@ def main():
                 parsed = parse_privmsg(line)
                 if not parsed:
                     continue
-                user, message = parsed
+                chat_channel, user, message, message_id = parsed
                 ts = time.time()
-                detector.add_message(ts, user, message)
-                if record_file:
+                if chat_channel == owner_login:
+                    handle_owner_command(message, message_id)
+                if chat_channel == channel:
+                    detector.add_message(ts, user, message)
+                if record_file and chat_channel == channel:
                     record_file.write(
                         json.dumps({"ts": ts, "user": user, "text": message}, ensure_ascii=False)
                         + "\n"
