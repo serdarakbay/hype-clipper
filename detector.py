@@ -15,6 +15,16 @@ TRIGGER_COOLDOWN = 90
 PEAK_DROP_RATIO = 0.70
 PEAK_TIMEOUT = 20
 MIN_STDDEV = 0.01
+BOT_USERS = frozenset({"nightbot", "streamelements", "fossabot", "moobot", "streamlabs"})
+TIERS = ((3.0, "NICE"), (4.5, "GREAT"), (6.0, "INSANE"), (8.0, "LEGENDARY"))
+
+
+def tier_for_score(score):
+    tier = None
+    for cutoff, name in TIERS:
+        if score >= cutoff:
+            tier = name
+    return tier
 
 
 def top_words(messages):
@@ -28,9 +38,14 @@ def top_words(messages):
 @dataclass(frozen=True)
 class Sample:
     time: float
-    rate: float
+    unique_chatters: int
     mean: float
     hype_score: float
+
+    @property
+    def rate(self):
+        """Compatibility name: activity is now unique chatters per 10-second window."""
+        return self.unique_chatters
 
 
 @dataclass(frozen=True)
@@ -40,6 +55,7 @@ class Trigger:
     peak_rate: float
     peak_hype_score: float
     top_words: list
+    tier: str
 
 
 class HypeDetector:
@@ -54,9 +70,12 @@ class HypeDetector:
         self.last_trigger_time = float("-inf")
         self.pending = None
         self.latest = Sample(self.start_time, 0.0, 0.0, 0.0)
+        self.notices = deque()
 
     def add_message(self, ts, user, text):
         """Add a timestamped message. Call advance_to() to process due samples."""
+        if text.startswith("!") or user.casefold() in BOT_USERS:
+            return
         self.messages.append((float(ts), user, text))
 
     def _sample(self, now):
@@ -64,17 +83,17 @@ class HypeDetector:
         while self.messages and self.messages[0][0] <= cutoff:
             self.messages.popleft()
         active = [row for row in self.messages if cutoff < row[0] <= now]
-        rate = len(active) / WINDOW_SECONDS
+        unique_chatters = len({row[1].casefold() for row in active})
 
         while self.baseline and now - self.baseline[0][0] > BASELINE_SECONDS:
             self.baseline.popleft()
         if self.baseline:
             mean = statistics.fmean(value for _ts, value in self.baseline)
             stddev = statistics.pstdev(value for _ts, value in self.baseline)
-            score = (rate - mean) / max(stddev, MIN_STDDEV)
+            score = (unique_chatters - mean) / max(stddev, MIN_STDDEV)
         else:
             mean, score = 0.0, 0.0
-        sample = Sample(now, rate, mean, score)
+        sample = Sample(now, unique_chatters, mean, score)
         self.latest = sample
 
         if self.pending is None:
@@ -83,17 +102,25 @@ class HypeDetector:
             if warmed_up and cooldown_done and score > self.threshold:
                 self.pending = {
                     "trigger_time": now,
-                    "peak_rate": rate,
+                    "peak_rate": unique_chatters,
                     "peak_hype_score": score,
                     "top_words": top_words(active),
+                    "tier": tier_for_score(score),
                 }
+                self.notices.append({"type": "trigger", "tier": self.pending["tier"]})
         else:
             pending = self.pending
-            if rate > pending["peak_rate"]:
-                pending["peak_rate"] = rate
+            if unique_chatters > pending["peak_rate"]:
+                pending["peak_rate"] = unique_chatters
                 pending["top_words"] = top_words(active)
             pending["peak_hype_score"] = max(pending["peak_hype_score"], score)
-            fell_from_peak = rate < pending["peak_rate"] * PEAK_DROP_RATIO
+            current_tier = tier_for_score(pending["peak_hype_score"])
+            tier_order = [name for _cutoff, name in TIERS]
+            old_tier_rank = tier_order.index(pending["tier"]) if pending["tier"] else -1
+            if current_tier and tier_order.index(current_tier) > old_tier_rank:
+                pending["tier"] = current_tier
+                self.notices.append({"type": "tier_up", "tier": current_tier})
+            fell_from_peak = unique_chatters < pending["peak_rate"] * PEAK_DROP_RATIO
             timed_out = now - pending["trigger_time"] >= PEAK_TIMEOUT
             if fell_from_peak or timed_out:
                 trigger = Trigger(
@@ -102,14 +129,24 @@ class HypeDetector:
                     peak_rate=pending["peak_rate"],
                     peak_hype_score=pending["peak_hype_score"],
                     top_words=pending["top_words"],
+                    tier=pending["tier"] or "NICE",
                 )
                 self.pending = None
                 self.last_trigger_time = pending["trigger_time"]
-                self.baseline.append((now, rate))
+                self.baseline.append((now, unique_chatters))
                 return sample, trigger
 
-        self.baseline.append((now, rate))
+        self.baseline.append((now, unique_chatters))
         return sample, None
+
+    def current_unique_chatters(self, now):
+        cutoff = float(now) - WINDOW_SECONDS
+        return len({user.casefold() for ts, user, _text in self.messages if cutoff < ts <= now})
+
+    def drain_notices(self):
+        notices = list(self.notices)
+        self.notices.clear()
+        return notices
 
     def advance_to(self, now):
         """Process all 2-second sample boundaries through the given timestamp."""

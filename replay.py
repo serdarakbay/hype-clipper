@@ -3,8 +3,10 @@
 import argparse
 import json
 from pathlib import Path
+import time
 
 from detector import HypeDetector, PEAK_TIMEOUT
+import overlay as obs_overlay
 
 
 def read_messages(path):
@@ -30,8 +32,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path, help="Recorded chat JSONL file")
     parser.add_argument("--threshold", type=float, default=3.0, help="Hype score threshold (default: 3.0)")
+    parser.add_argument("--speed", type=float, help="Replay at this multiple of recorded time")
+    parser.add_argument("--overlay", action="store_true", help="Serve and update the OBS overlay")
     args = parser.parse_args()
 
+    if args.speed is not None and args.speed <= 0:
+        parser.error("--speed must be greater than zero")
+    if args.overlay:
+        obs_overlay.start_server()
+        print("OBS overlay: http://localhost:8765")
     if not args.path.is_file():
         raise SystemExit(f"File not found: {args.path}")
     messages = read_messages(args.path)
@@ -42,24 +51,63 @@ def main():
 
     started_at = messages[0][0]
     detector = HypeDetector(started_at, threshold=args.threshold)
-    triggers = []
-    for ts, user, text in messages:
-        detector.add_message(ts, user, text)
-        triggers.extend(detector.advance_to(ts))
-
     ended_at = messages[-1][0]
-    triggers.extend(detector.advance_to(ended_at + PEAK_TIMEOUT))
+    replay_end = ended_at + PEAK_TIMEOUT
+    replay_clock = time.monotonic()
+    next_message = 0
+    next_status = started_at
+    trigger_count = 0
+    while True:
+        candidates = [replay_end, detector.next_sample]
+        if next_message < len(messages):
+            candidates.append(messages[next_message][0])
+        if args.overlay:
+            candidates.append(next_status)
+        target = min(candidates)
 
-    for trigger in triggers:
-        offset = trigger.trigger_time - started_at
-        print(
-            f"TRIGGER offset={offset:.1f}s peak_rate={trigger.peak_rate:.2f} "
-            f"top_words={','.join(trigger.top_words) or '(none)'}"
-        )
+        if args.speed is not None:
+            target_real = replay_clock + (target - started_at) / args.speed
+            delay = target_real - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+
+        while next_message < len(messages) and messages[next_message][0] <= target:
+            ts, user, text = messages[next_message]
+            detector.add_message(ts, user, text)
+            next_message += 1
+
+        completed = detector.advance_to(target)
+        notices = detector.drain_notices()
+        if args.overlay:
+            for notice in notices:
+                obs_overlay.publish(notice)
+            if target >= next_status:
+                sample = detector.latest
+                obs_overlay.publish({
+                    "type": "status",
+                    "unique_chatters": detector.current_unique_chatters(target),
+                    "mean": sample.mean,
+                    "hype_score": sample.hype_score,
+                })
+                next_status += 1
+
+        for trigger in completed:
+            trigger_count += 1
+            title = f"{trigger.tier} moment"
+            if args.overlay:
+                obs_overlay.publish({"type": "clip", "title": title, "url": None})
+            offset = trigger.trigger_time - started_at
+            print(
+                f"TRIGGER offset={offset:.1f}s tier={trigger.tier} "
+                f"peak_rate={trigger.peak_rate:.2f} "
+                f"top_words={','.join(trigger.top_words) or '(none)'}"
+            )
+        if target >= replay_end:
+            break
 
     duration = ended_at - started_at
-    per_hour = len(triggers) * 3600 / duration if duration > 0 else 0.0
-    print(f"Total triggers: {len(triggers)}")
+    per_hour = trigger_count * 3600 / duration if duration > 0 else 0.0
+    print(f"Total triggers: {trigger_count}")
     print(f"Triggers per hour: {per_hour:.2f}")
 
 

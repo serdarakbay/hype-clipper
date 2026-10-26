@@ -8,12 +8,14 @@ from pathlib import Path
 import secrets
 import socket
 import ssl
+import threading
 import time
 
 import requests
 from dotenv import load_dotenv
 
 from detector import HypeDetector
+import overlay as obs_overlay
 
 
 API = "https://api.twitch.tv/helix"
@@ -100,6 +102,7 @@ def main():
     parser.add_argument("channel", help="Twitch channel login name")
     parser.add_argument("--dry-run", action="store_true", help="Detect hype without creating clips")
     parser.add_argument("--record", action="store_true", help="Append chat messages to a JSONL file")
+    parser.add_argument("--overlay", action="store_true", help="Serve the OBS overlay on localhost:8765")
     args = parser.parse_args()
     channel = args.channel.lstrip("#").lower()
 
@@ -124,23 +127,42 @@ def main():
     started_at = time.time()
     detector = HypeDetector(started_at)
     next_status = started_at + STATUS_INTERVAL
+    stop_status = threading.Event()
+    status_thread = None
     pending = ""
     sock = None
     print("Watching #{}; press Ctrl+C to stop.".format(channel))
+    if args.overlay:
+        obs_overlay.start_server()
+        print("OBS overlay: http://localhost:8765")
+
+        def publish_status():
+            while not stop_status.wait(1):
+                sample = detector.latest
+                obs_overlay.publish({
+                    "type": "status",
+                    "unique_chatters": sample.unique_chatters,
+                    "mean": sample.mean,
+                    "hype_score": sample.hype_score,
+                })
+
+        status_thread = threading.Thread(target=publish_status, name="overlay-status", daemon=True)
+        status_thread.start()
 
     def finish_triggers(triggers):
         for trigger in triggers:
             clip_time = time.time()
             clip_url = None
             clip_error = None
+            title = f"{trigger.tier} moment"
             if not args.dry_run:
-                title = "Hype: " + (" ".join(trigger.top_words) if trigger.top_words else "chat spike")
                 try:
                     clip_url, clip_error = create_clip(broadcaster_id, title, headers)
                 except requests.RequestException as exc:
                     clip_error = exc.response.text if exc.response is not None else str(exc)
 
             event = {
+                "title": f"{trigger.tier} moment",
                 "trigger_time": iso_time(trigger.trigger_time),
                 "clip_time": iso_time(clip_time),
                 "peak_rate": trigger.peak_rate,
@@ -152,10 +174,15 @@ def main():
                 event["clip_error"] = clip_error
             with Path(__file__).with_name("clips.jsonl").open("a", encoding="utf-8") as log:
                 log.write(json.dumps(event, ensure_ascii=False) + "\n")
+            if args.overlay:
+                obs_overlay.publish({
+                    "type": "clip",
+                    "title": event["title"],
+                    "url": clip_url,
+                })
             print(
-                f"CLIP trigger_time={event['trigger_time']} clip_time={event['clip_time']} "
+                f"CLIP tier={trigger.tier} trigger_time={event['trigger_time']} clip_time={event['clip_time']} "
                 f"peak_rate={trigger.peak_rate:.2f} peak_hype_score={trigger.peak_hype_score:.2f} "
-                f"top_words={','.join(trigger.top_words) or '(none)'} "
                 f"clip_url={clip_url or 'null'}"
                 + (f" error={clip_error}" if clip_error else ""),
                 flush=True,
@@ -165,7 +192,12 @@ def main():
         sock = connect_chat(channel)
         while True:
             now = time.time()
-            finish_triggers(detector.advance_to(now))
+            completed = detector.advance_to(now)
+            notices = detector.drain_notices()
+            if args.overlay:
+                for notice in notices:
+                    obs_overlay.publish(notice)
+            finish_triggers(completed)
             if now >= next_status:
                 sample = detector.latest
                 print(
@@ -203,6 +235,9 @@ def main():
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
+        stop_status.set()
+        if status_thread is not None:
+            status_thread.join(timeout=2)
         if sock is not None:
             sock.close()
         if record_file:
