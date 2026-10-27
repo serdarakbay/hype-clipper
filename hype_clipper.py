@@ -162,25 +162,23 @@ def main():
             raise SystemExit(f"Could not look up channel: {detail}") from exc
 
     record_file = None
-    stop_record_flusher = threading.Event()
-    record_flusher = None
+    last_record_flush = time.monotonic()
     if args.record:
         data_dir = Path(__file__).with_name("data")
         data_dir.mkdir(exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
         record_file = (data_dir / f"chat_{channel}_{stamp}.jsonl").open("a", encoding="utf-8")
 
-        def flush_record_periodically():
-            while not stop_record_flusher.wait(5):
-                try:
-                    record_file.flush()
-                except (OSError, ValueError):
-                    break
-
-        record_flusher = threading.Thread(
-            target=flush_record_periodically, name="chat-record-flusher", daemon=True
+    def write_chat_record(ts, user, message):
+        nonlocal last_record_flush
+        record_file.write(
+            json.dumps({"ts": ts, "user": user, "text": message}, ensure_ascii=False)
+            + "\n"
         )
-        record_flusher.start()
+        now = time.monotonic()
+        if now - last_record_flush >= 5:
+            record_file.flush()
+            last_record_flush = now
 
     started_at = time.time()
     detector = HypeDetector(started_at, min_ratio=SENSITIVITY_RATIOS[args.sensitivity])
@@ -338,17 +336,11 @@ def main():
                     handle_owner_command(message, message_id)
                 if chat_channel == channel:
                     detector.add_message(ts, user, message)
-                if record_file and chat_channel == channel:
-                    record_file.write(
-                        json.dumps({"ts": ts, "user": user, "text": message}, ensure_ascii=False)
-                        + "\n"
-                    )
+                if record_file is not None and chat_channel == channel:
+                    write_chat_record(ts, user, message)
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
-        stop_record_flusher.set()
-        if record_flusher is not None:
-            record_flusher.join()
         stop_status.set()
         if status_thread is not None:
             status_thread.join(timeout=2)
