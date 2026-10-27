@@ -2,15 +2,12 @@
 
 import argparse
 import json
-import os
-from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
+from twitch_auth import TwitchAuth
 
 
 API = "https://api.twitch.tv/helix"
-TOKEN_FILE = Path(__file__).with_name("tokens.json")
 
 
 def main():
@@ -18,29 +15,19 @@ def main():
     parser.add_argument("channel", help="Twitch channel login name")
     args = parser.parse_args()
 
-    if not TOKEN_FILE.exists():
-        raise SystemExit("tokens.json not found; run auth.py first")
-    access_token = json.loads(TOKEN_FILE.read_text(encoding="utf-8"))["access_token"]
-
-    # Twitch's Helix API requires the OAuth app's client ID alongside the token.
-    load_dotenv(Path(__file__).with_name(".env"))
-    client_id = os.getenv("TWITCH_CLIENT_ID")
-    if not client_id:
-        raise SystemExit("Set TWITCH_CLIENT_ID in .env")
-    headers = {"Authorization": f"Bearer {access_token}", "Client-Id": client_id}
+    auth = TwitchAuth.from_env()
 
     try:
-        user_response = requests.get(
-            f"{API}/users", headers=headers, params={"login": args.channel}, timeout=30
+        user_response = auth.get(
+            f"{API}/users", params={"login": args.channel}, timeout=30
         )
         user_response.raise_for_status()
         users = user_response.json().get("data", [])
         if not users:
             print(json.dumps({"error": f"Channel not found: {args.channel}"}, indent=2))
             return
-        clip_response = requests.post(
+        clip_response = auth.post(
             f"{API}/clips",
-            headers=headers,
             params={"broadcaster_id": users[0]["id"]},
             timeout=30,
         )
@@ -58,6 +45,8 @@ def main():
         else:
             print(f"Request failed: {exc}")
         raise SystemExit(1) from exc
+    finally:
+        auth.close()
 
 
 if __name__ == "__main__":

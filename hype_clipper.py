@@ -3,7 +3,6 @@
 import argparse
 from datetime import datetime, timezone
 import json
-import os
 from pathlib import Path
 import secrets
 import socket
@@ -12,36 +11,21 @@ import threading
 import time
 
 import requests
-from dotenv import load_dotenv
 
 from detector import HypeDetector, SENSITIVITY_RATIOS, chatter_ratio, tier_for_ratio
 import overlay as obs_overlay
+from twitch_auth import TwitchAuth
 
 
 API = "https://api.twitch.tv/helix"
-TOKEN_FILE = Path(__file__).with_name("tokens.json")
 CHAT_HOST = "irc.chat.twitch.tv"
 CHAT_PORT = 6697
 STATUS_INTERVAL = 10
 
 
-def get_auth():
-    load_dotenv(Path(__file__).with_name(".env"))
-    client_id = os.getenv("TWITCH_CLIENT_ID")
-    if not client_id:
-        raise SystemExit("Set TWITCH_CLIENT_ID in .env")
-    if not TOKEN_FILE.exists():
-        raise SystemExit("tokens.json not found; run auth.py first")
-    try:
-        access_token = json.loads(TOKEN_FILE.read_text(encoding="utf-8"))["access_token"]
-    except (OSError, ValueError, KeyError) as exc:
-        raise SystemExit(f"Could not read access_token from tokens.json: {exc}") from exc
-    return client_id, access_token
-
-
-def get_broadcaster_id(channel, headers):
-    response = requests.get(
-        f"{API}/users", headers=headers, params={"login": channel}, timeout=30
+def get_broadcaster_id(channel, auth):
+    response = auth.get(
+        f"{API}/users", params={"login": channel}, timeout=30
     )
     response.raise_for_status()
     users = response.json().get("data", [])
@@ -50,9 +34,9 @@ def get_broadcaster_id(channel, headers):
     return users[0]["id"]
 
 
-def get_authenticated_user(headers):
+def get_authenticated_user(auth):
     """Get the channel owner represented by the saved user access token."""
-    response = requests.get(f"{API}/users", headers=headers, timeout=30)
+    response = auth.get(f"{API}/users", timeout=30)
     response.raise_for_status()
     users = response.json().get("data", [])
     if not users:
@@ -60,13 +44,12 @@ def get_authenticated_user(headers):
     return users[0]
 
 
-def send_chat_message(owner_id, message, headers, reply_parent_message_id=None):
+def send_chat_message(owner_id, message, auth, reply_parent_message_id=None):
     body = {"broadcaster_id": owner_id, "sender_id": owner_id, "message": message}
     if reply_parent_message_id:
         body["reply_parent_message_id"] = reply_parent_message_id
-    response = requests.post(
+    response = auth.post(
         f"{API}/chat/messages",
-        headers=headers,
         json=body,
         timeout=30,
     )
@@ -78,10 +61,9 @@ def send_chat_message(owner_id, message, headers, reply_parent_message_id=None):
         print(f"Chat reply was not sent: {json.dumps(body)}")
 
 
-def send_announcement(owner_id, message, headers):
-    response = requests.post(
+def send_announcement(owner_id, message, auth):
+    response = auth.post(
         f"{API}/chat/announcements",
-        headers=headers,
         params={"broadcaster_id": owner_id, "moderator_id": owner_id},
         json={"message": message, "color": "purple"},
         timeout=30,
@@ -90,10 +72,9 @@ def send_announcement(owner_id, message, headers):
         print(f"Announcement failed (HTTP {response.status_code}): {response.text}")
 
 
-def create_clip(broadcaster_id, title, headers):
-    response = requests.post(
+def create_clip(broadcaster_id, title, auth):
+    response = auth.post(
         f"{API}/clips",
-        headers=headers,
         params={"broadcaster_id": broadcaster_id, "title": title},
         timeout=30,
     )
@@ -162,10 +143,10 @@ def main():
     args = parser.parse_args()
     channel = args.channel.lstrip("#").lower()
 
-    client_id, access_token = get_auth()
-    headers = {"Authorization": f"Bearer {access_token}", "Client-Id": client_id}
+    auth = TwitchAuth.from_env()
+    auth.start_periodic_validation()
     try:
-        owner = get_authenticated_user(headers)
+        owner = get_authenticated_user(auth)
     except requests.RequestException as exc:
         detail = exc.response.text if exc.response is not None else str(exc)
         raise SystemExit(f"Could not look up authenticated Twitch user: {detail}") from exc
@@ -175,7 +156,7 @@ def main():
     broadcaster_id = None
     if not args.dry_run:
         try:
-            broadcaster_id = get_broadcaster_id(channel, headers)
+            broadcaster_id = get_broadcaster_id(channel, auth)
         except requests.RequestException as exc:
             detail = exc.response.text if exc.response is not None else str(exc)
             raise SystemExit(f"Could not look up channel: {detail}") from exc
@@ -237,7 +218,7 @@ def main():
             title = f"{tier} moment"
             if not args.dry_run:
                 try:
-                    clip_url, clip_error = create_clip(broadcaster_id, title, headers)
+                    clip_url, clip_error = create_clip(broadcaster_id, title, auth)
                 except requests.RequestException as exc:
                     clip_error = exc.response.text if exc.response is not None else str(exc)
                 if clip_url:
@@ -253,7 +234,7 @@ def main():
                     announcement = None
                 if announcement:
                     try:
-                        send_announcement(owner_id, announcement, headers)
+                        send_announcement(owner_id, announcement, auth)
                     except requests.RequestException as exc:
                         detail = exc.response.text if exc.response is not None else str(exc)
                         print(f"Announcement failed: {detail}")
@@ -308,7 +289,7 @@ def main():
             level = {"NICE": 1, "GREAT": 2, "INSANE": 3, "LEGENDARY": 4}.get(tier, 0)
             reply = f"LEVEL {level} {tier or 'Building up'} · ratio {ratio:.2f}x · hype_score {sample.hype_score:.2f}"
         try:
-            send_chat_message(owner_id, reply, headers, message_id)
+            send_chat_message(owner_id, reply, auth, message_id)
         except requests.RequestException as exc:
             detail = exc.response.text if exc.response is not None else str(exc)
             print(f"Chat reply failed: {detail}")
@@ -373,6 +354,7 @@ def main():
         if record_file:
             record_file.flush()
             record_file.close()
+        auth.close()
 
 
 if __name__ == "__main__":
