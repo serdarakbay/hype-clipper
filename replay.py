@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import time
 
-from detector import HypeDetector, PEAK_TIMEOUT
+from detector import HypeDetector, PEAK_TIMEOUT, SENSITIVITY_RATIOS
 import overlay as obs_overlay
 
 
@@ -34,6 +34,10 @@ def main():
     parser.add_argument("--threshold", type=float, default=3.0, help="Hype score threshold (default: 3.0)")
     parser.add_argument("--speed", type=float, help="Replay at this multiple of recorded time")
     parser.add_argument("--overlay", action="store_true", help="Serve and update the OBS overlay")
+    parser.add_argument(
+        "--sensitivity", choices=tuple(SENSITIVITY_RATIOS), default="medium",
+        help="Minimum chatter ratio for a trigger (default: medium)",
+    )
     args = parser.parse_args()
 
     if args.speed is not None and args.speed <= 0:
@@ -50,7 +54,11 @@ def main():
         return
 
     started_at = messages[0][0]
-    detector = HypeDetector(started_at, threshold=args.threshold)
+    detector = HypeDetector(
+        started_at,
+        threshold=args.threshold,
+        min_ratio=SENSITIVITY_RATIOS[args.sensitivity],
+    )
     ended_at = messages[-1][0]
     replay_end = ended_at + PEAK_TIMEOUT
     replay_clock = time.monotonic()
@@ -93,13 +101,15 @@ def main():
 
         for trigger in completed:
             trigger_count += 1
-            title = f"{trigger.tier} moment"
+            tier = trigger.tier
+            title = f"{tier} moment"
             if args.overlay:
                 obs_overlay.publish({"type": "clip", "title": title, "url": None})
             offset = trigger.trigger_time - started_at
             print(
-                f"TRIGGER offset={offset:.1f}s tier={trigger.tier} "
+                f"TRIGGER offset={offset:.1f}s tier={tier} "
                 f"peak_rate={trigger.peak_rate:.2f} "
+                f"peak_ratio={trigger.peak_ratio:.2f}x "
                 f"top_words={','.join(trigger.top_words) or '(none)'}"
             )
         if target >= replay_end:

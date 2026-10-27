@@ -9,20 +9,29 @@ import statistics
 SAMPLE_INTERVAL = 2
 WINDOW_SECONDS = 10
 BASELINE_SECONDS = 5 * 60
-WARMUP_SECONDS = 2 * 60
+WARMUP_SECONDS = 3 * 60
+WARMUP_SAMPLES = WARMUP_SECONDS // SAMPLE_INTERVAL
 TRIGGER_SCORE = 3.0
 TRIGGER_COOLDOWN = 90
 PEAK_DROP_RATIO = 0.70
 PEAK_TIMEOUT = 20
-MIN_STDDEV = 0.01
+RELATIVE_MAD_FLOOR = 0.1
+ABSOLUTE_MAD_FLOOR = 1.0
+SESSION_END_SCORE = 1.0
 BOT_USERS = frozenset({"nightbot", "streamelements", "fossabot", "moobot", "streamlabs"})
-TIERS = ((3.0, "NICE"), (4.5, "GREAT"), (6.0, "INSANE"), (8.0, "LEGENDARY"))
+TIER_RATIO_THRESHOLDS = ((2.0, "NICE"), (3.0, "GREAT"), (4.0, "INSANE"), (6.0, "LEGENDARY"))
+SENSITIVITY_RATIOS = {"low": 3.0, "medium": 2.5, "high": 2.0}
 
 
-def tier_for_score(score):
+def chatter_ratio(unique_chatters, median):
+    """Return an activity ratio; a zero baseline has no meaningful ratio."""
+    return unique_chatters / median if median > 0 else 0.0
+
+
+def tier_for_ratio(ratio):
     tier = None
-    for cutoff, name in TIERS:
-        if score >= cutoff:
+    for minimum_ratio, name in TIER_RATIO_THRESHOLDS:
+        if ratio >= minimum_ratio:
             tier = name
     return tier
 
@@ -39,8 +48,13 @@ def top_words(messages):
 class Sample:
     time: float
     unique_chatters: int
-    mean: float
+    median: float
     hype_score: float
+
+    @property
+    def mean(self):
+        """Compatibility alias for the baseline statistic in older status consumers."""
+        return self.median
 
     @property
     def rate(self):
@@ -53,6 +67,8 @@ class Trigger:
     trigger_time: float
     clip_time: float
     peak_rate: float
+    trigger_median: float
+    peak_ratio: float
     peak_hype_score: float
     top_words: list
     tier: str
@@ -61,14 +77,16 @@ class Trigger:
 class HypeDetector:
     """Sample message activity and resolve hype triggers at their peak."""
 
-    def __init__(self, start_time, threshold=TRIGGER_SCORE):
+    def __init__(self, start_time, threshold=TRIGGER_SCORE, min_ratio=SENSITIVITY_RATIOS["medium"]):
         self.start_time = float(start_time)
         self.threshold = threshold
+        self.min_ratio = max(float(min_ratio), TIER_RATIO_THRESHOLDS[0][0])
         self.next_sample = self.start_time
         self.messages = deque()  # (unix timestamp, user, text)
-        self.baseline = deque()  # (timestamp, rate in messages per second)
+        self.baseline = deque()  # (timestamp, unique chatters in the 10-second window)
         self.last_trigger_time = float("-inf")
         self.pending = None
+        self.session_active = False
         self.latest = Sample(self.start_time, 0.0, 0.0, 0.0)
         self.notices = deque()
 
@@ -88,34 +106,56 @@ class HypeDetector:
         while self.baseline and now - self.baseline[0][0] > BASELINE_SECONDS:
             self.baseline.popleft()
         if self.baseline:
-            mean = statistics.fmean(value for _ts, value in self.baseline)
-            stddev = statistics.pstdev(value for _ts, value in self.baseline)
-            score = (unique_chatters - mean) / max(stddev, MIN_STDDEV)
+            values = [value for _ts, value in self.baseline]
+            median = statistics.median(values)
+            mad = statistics.median(abs(value - median) for value in values)
+            mad_floor = max(mad, RELATIVE_MAD_FLOOR * median, ABSOLUTE_MAD_FLOOR)
+            score = (unique_chatters - median) / (1.4826 * mad_floor)
         else:
-            mean, score = 0.0, 0.0
-        sample = Sample(now, unique_chatters, mean, score)
+            median, score = 0.0, 0.0
+        sample = Sample(now, unique_chatters, median, score)
         self.latest = sample
 
+        session_was_active = self.session_active
+        if session_was_active and score < SESSION_END_SCORE:
+            self.session_active = False
+
         if self.pending is None:
-            warmed_up = now - self.start_time >= WARMUP_SECONDS
-            cooldown_done = now - self.last_trigger_time >= TRIGGER_COOLDOWN
-            if warmed_up and cooldown_done and score > self.threshold:
-                self.pending = {
-                    "trigger_time": now,
-                    "peak_rate": unique_chatters,
-                    "peak_hype_score": score,
-                    "top_words": top_words(active),
-                    "tier": tier_for_score(score),
-                }
-                self.notices.append({"type": "trigger", "tier": self.pending["tier"]})
+            if not session_was_active:
+                warmed_up = (
+                    len(self.baseline) >= WARMUP_SAMPLES
+                    and self.baseline[-1][0] - self.baseline[0][0] >= WARMUP_SECONDS
+                )
+                cooldown_done = now - self.last_trigger_time >= TRIGGER_COOLDOWN
+                current_ratio = chatter_ratio(unique_chatters, median)
+                ratio_gate = (
+                    unique_chatters >= self.min_ratio * median
+                    and current_ratio >= self.min_ratio
+                )
+                if warmed_up and cooldown_done and score >= self.threshold and ratio_gate:
+                    self.pending = {
+                        "trigger_time": now,
+                        "peak_rate": unique_chatters,
+                        "trigger_median": median,
+                        "peak_ratio": current_ratio,
+                        "peak_hype_score": score,
+                        "top_words": top_words(active),
+                        "tier": tier_for_ratio(current_ratio) or "NICE",
+                    }
+                    self.session_active = True
+                    self.notices.append({"type": "trigger", "tier": self.pending["tier"]})
         else:
             pending = self.pending
             if unique_chatters > pending["peak_rate"]:
                 pending["peak_rate"] = unique_chatters
                 pending["top_words"] = top_words(active)
+            pending["peak_ratio"] = max(
+                pending["peak_ratio"],
+                chatter_ratio(unique_chatters, pending["trigger_median"]),
+            )
             pending["peak_hype_score"] = max(pending["peak_hype_score"], score)
-            current_tier = tier_for_score(pending["peak_hype_score"])
-            tier_order = [name for _cutoff, name in TIERS]
+            current_tier = tier_for_ratio(pending["peak_ratio"])
+            tier_order = [name for _ratio, name in TIER_RATIO_THRESHOLDS]
             old_tier_rank = tier_order.index(pending["tier"]) if pending["tier"] else -1
             if current_tier and tier_order.index(current_tier) > old_tier_rank:
                 pending["tier"] = current_tier
@@ -127,16 +167,20 @@ class HypeDetector:
                     trigger_time=pending["trigger_time"],
                     clip_time=now,
                     peak_rate=pending["peak_rate"],
+                    trigger_median=pending["trigger_median"],
+                    peak_ratio=pending["peak_ratio"],
                     peak_hype_score=pending["peak_hype_score"],
                     top_words=pending["top_words"],
-                    tier=pending["tier"] or "NICE",
+                    tier=pending["tier"],
                 )
                 self.pending = None
                 self.last_trigger_time = pending["trigger_time"]
-                self.baseline.append((now, unique_chatters))
+                if not self.session_active:
+                    self.baseline.append((now, unique_chatters))
                 return sample, trigger
 
-        self.baseline.append((now, unique_chatters))
+        if not self.session_active:
+            self.baseline.append((now, unique_chatters))
         return sample, None
 
     def current_unique_chatters(self, now):

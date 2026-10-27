@@ -14,7 +14,7 @@ import time
 import requests
 from dotenv import load_dotenv
 
-from detector import HypeDetector, tier_for_score
+from detector import HypeDetector, SENSITIVITY_RATIOS, chatter_ratio, tier_for_ratio
 import overlay as obs_overlay
 
 
@@ -155,6 +155,10 @@ def main():
     parser.add_argument("--record", action="store_true", help="Append chat messages to a JSONL file")
     parser.add_argument("--overlay", action="store_true", help="Serve the OBS overlay on localhost:8765")
     parser.add_argument("--announce", action="store_true", help="Announce clip moments in your own channel")
+    parser.add_argument(
+        "--sensitivity", choices=tuple(SENSITIVITY_RATIOS), default="medium",
+        help="Minimum chatter ratio for a trigger (default: medium)",
+    )
     args = parser.parse_args()
     channel = args.channel.lstrip("#").lower()
 
@@ -177,14 +181,28 @@ def main():
             raise SystemExit(f"Could not look up channel: {detail}") from exc
 
     record_file = None
+    stop_record_flusher = threading.Event()
+    record_flusher = None
     if args.record:
         data_dir = Path(__file__).with_name("data")
         data_dir.mkdir(exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
         record_file = (data_dir / f"chat_{channel}_{stamp}.jsonl").open("a", encoding="utf-8")
 
+        def flush_record_periodically():
+            while not stop_record_flusher.wait(5):
+                try:
+                    record_file.flush()
+                except (OSError, ValueError):
+                    break
+
+        record_flusher = threading.Thread(
+            target=flush_record_periodically, name="chat-record-flusher", daemon=True
+        )
+        record_flusher.start()
+
     started_at = time.time()
-    detector = HypeDetector(started_at)
+    detector = HypeDetector(started_at, min_ratio=SENSITIVITY_RATIOS[args.sensitivity])
     session_clips = []
     last_command_reply = {"clips": float("-inf"), "hype": float("-inf")}
     next_status = started_at + STATUS_INTERVAL
@@ -215,21 +233,22 @@ def main():
             clip_time = time.time()
             clip_url = None
             clip_error = None
-            title = f"{trigger.tier} moment"
+            tier = trigger.tier
+            title = f"{tier} moment"
             if not args.dry_run:
                 try:
                     clip_url, clip_error = create_clip(broadcaster_id, title, headers)
                 except requests.RequestException as exc:
                     clip_error = exc.response.text if exc.response is not None else str(exc)
                 if clip_url:
-                    session_clips.append({"tier": trigger.tier, "url": clip_url})
+                    session_clips.append({"tier": tier, "url": clip_url})
 
             if args.announce:
-                level = {"NICE": 1, "GREAT": 2, "INSANE": 3, "LEGENDARY": 4}.get(trigger.tier, 1)
+                level = {"NICE": 1, "GREAT": 2, "INSANE": 3, "LEGENDARY": 4}[tier]
                 if args.dry_run:
-                    announcement = f"⚡ LEVEL {level} {trigger.tier} moment detected (dry run)"
+                    announcement = f"⚡ LEVEL {level} {tier} moment detected (dry run)"
                 elif clip_url:
-                    announcement = f"⚡ LEVEL {level} {trigger.tier} moment clipped! {clip_url}"
+                    announcement = f"⚡ LEVEL {level} {tier} moment clipped! {clip_url}"
                 else:
                     announcement = None
                 if announcement:
@@ -240,10 +259,12 @@ def main():
                         print(f"Announcement failed: {detail}")
 
             event = {
-                "title": f"{trigger.tier} moment",
+                "title": title,
                 "trigger_time": iso_time(trigger.trigger_time),
                 "clip_time": iso_time(clip_time),
                 "peak_rate": trigger.peak_rate,
+                "trigger_median": trigger.trigger_median,
+                "peak_ratio": trigger.peak_ratio,
                 "peak_hype_score": trigger.peak_hype_score,
                 "top_words": trigger.top_words,
                 "clip_url": clip_url,
@@ -259,8 +280,9 @@ def main():
                     "url": clip_url,
                 })
             print(
-                f"CLIP tier={trigger.tier} trigger_time={event['trigger_time']} clip_time={event['clip_time']} "
+                f"CLIP tier={tier} trigger_time={event['trigger_time']} clip_time={event['clip_time']} "
                 f"peak_rate={trigger.peak_rate:.2f} peak_hype_score={trigger.peak_hype_score:.2f} "
+                f"peak_ratio={trigger.peak_ratio:.2f}x "
                 f"clip_url={clip_url or 'null'}"
                 + (f" error={clip_error}" if clip_error else ""),
                 flush=True,
@@ -281,9 +303,10 @@ def main():
             reply = " | ".join(f"{clip['tier']} {clip['url']}" for clip in recent) if recent else "No clips yet"
         else:
             sample = detector.latest
-            tier = tier_for_score(sample.hype_score)
+            ratio = chatter_ratio(sample.unique_chatters, sample.median)
+            tier = tier_for_ratio(ratio)
             level = {"NICE": 1, "GREAT": 2, "INSANE": 3, "LEGENDARY": 4}.get(tier, 0)
-            reply = f"LEVEL {level} {tier or 'Building up'} · hype_score {sample.hype_score:.2f}"
+            reply = f"LEVEL {level} {tier or 'Building up'} · ratio {ratio:.2f}x · hype_score {sample.hype_score:.2f}"
         try:
             send_chat_message(owner_id, reply, headers, message_id)
         except requests.RequestException as exc:
@@ -303,7 +326,7 @@ def main():
             if now >= next_status:
                 sample = detector.latest
                 print(
-                    f"rate={sample.rate:.2f} mean={sample.mean:.2f} "
+                    f"unique_chatters={sample.unique_chatters} median={sample.median:.2f} "
                     f"hype_score={sample.hype_score:.2f}",
                     flush=True,
                 )
@@ -336,16 +359,19 @@ def main():
                         json.dumps({"ts": ts, "user": user, "text": message}, ensure_ascii=False)
                         + "\n"
                     )
-                    record_file.flush()
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
+        stop_record_flusher.set()
+        if record_flusher is not None:
+            record_flusher.join()
         stop_status.set()
         if status_thread is not None:
             status_thread.join(timeout=2)
         if sock is not None:
             sock.close()
         if record_file:
+            record_file.flush()
             record_file.close()
 
 
