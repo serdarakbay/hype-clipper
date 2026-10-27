@@ -73,10 +73,10 @@ With `--overlay`, the tool serves the OBS overlay at `http://localhost:8765`. Ad
 Replay a recording:
 
 ```sh
-python replay.py data/chat_jynxzi_20261027_0142.jsonl [--threshold 3.0] [--sensitivity low|medium|high] [--speed N] [--overlay]
+python replay.py data/chat_jynxzi_20261027_0142.jsonl [--start SECONDS] [--threshold 3.0] [--sensitivity low|medium|high] [--speed N] [--overlay]
 ```
 
-Replay runs as fast as possible unless `--speed N` is supplied; for example, `--speed 2` replays at twice real time. `--overlay` starts and updates the same OBS server.
+Replay runs as fast as possible unless `--speed N` is supplied; for example, `--speed 2` replays at twice real time. `--start SECONDS` starts at an offset into the recording while using earlier messages to build the detector baseline instantly. It also works with `--speed` and `--overlay`. `--overlay` starts and updates the same OBS server.
 
 Other utility commands:
 

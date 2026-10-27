@@ -32,6 +32,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path, help="Recorded chat JSONL file")
     parser.add_argument("--threshold", type=float, default=3.0, help="Hype score threshold (default: 3.0)")
+    parser.add_argument("--start", type=float, default=0.0, help="Start at this many seconds into the recording")
     parser.add_argument("--speed", type=float, help="Replay at this multiple of recorded time")
     parser.add_argument("--overlay", action="store_true", help="Serve and update the OBS overlay")
     parser.add_argument(
@@ -42,6 +43,8 @@ def main():
 
     if args.speed is not None and args.speed <= 0:
         parser.error("--speed must be greater than zero")
+    if args.start < 0:
+        parser.error("--start must be zero or greater")
     if args.overlay:
         obs_overlay.start_server()
         print("OBS overlay: http://localhost:8765")
@@ -61,10 +64,18 @@ def main():
         min_ratio=SENSITIVITY_RATIOS[args.sensitivity],
     )
     ended_at = messages[-1][0]
+    replay_started_at = started_at + args.start
+    next_message = 0
+    while next_message < len(messages) and messages[next_message][0] < replay_started_at:
+        ts, user, text = messages[next_message]
+        detector.add_message(ts, user, text)
+        next_message += 1
+    if args.start > 0:
+        detector.advance_to(replay_started_at, detect=False)
+
     replay_end = ended_at + WINDOW_SECONDS + PEAK_HARD_TIMEOUT
     replay_clock = time.monotonic()
-    next_message = 0
-    next_status = started_at
+    next_status = replay_started_at
     session_count = 0
     clip_count = 0
     while True:
@@ -76,7 +87,7 @@ def main():
         target = min(candidates)
 
         if args.speed is not None:
-            target_real = replay_clock + (target - started_at) / args.speed
+            target_real = replay_clock + (target - replay_started_at) / args.speed
             delay = target_real - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
@@ -139,7 +150,7 @@ def main():
         ):
             break
 
-    duration = ended_at - started_at
+    duration = max(0.0, ended_at - replay_started_at)
     per_hour = clip_count * 3600 / duration if duration > 0 else 0.0
     print(f"Total sessions: {session_count}")
     print(f"Total clips: {clip_count}")

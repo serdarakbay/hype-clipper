@@ -100,6 +100,7 @@ class HypeDetector:
         self.next_sample = self.start_time
         self.messages = deque()  # (unix timestamp, user, text)
         self.baseline = deque()  # (timestamp, unique chatters in the 10-second window)
+        self.baseline_primed = False
         self.rate_samples = deque(maxlen=PEAK_SMOOTHING_SAMPLES)
         self.clips_by_session = {}
         self.last_trigger_time = float("-inf")
@@ -123,7 +124,7 @@ class HypeDetector:
             return
         self.messages.append((float(ts), user, text))
 
-    def _sample(self, now):
+    def _sample(self, now, detect=True):
         cutoff = now - WINDOW_SECONDS
         while self.messages and self.messages[0][0] <= cutoff:
             self.messages.popleft()
@@ -144,6 +145,11 @@ class HypeDetector:
             median, score = 0.0, 0.0
         sample = Sample(now, unique_chatters, median, score)
         self.latest = sample
+
+        if not detect:
+            self.baseline.append((now, unique_chatters))
+            self.previous_score = score
+            return sample, None
 
         session_was_active = self.session_active
         if session_was_active:
@@ -179,7 +185,7 @@ class HypeDetector:
         ratio_median = self.session_median if self.session_active else median
         current_ratio = chatter_ratio(smoothed_rate, ratio_median)
         if not self.session_active and self.pending is None and start_wave:
-            warmed_up = (
+            warmed_up = self.baseline_primed or (
                 len(self.baseline) >= WARMUP_SAMPLES
                 and self.baseline[-1][0] - self.baseline[0][0] >= WARMUP_SECONDS
             )
@@ -326,13 +332,15 @@ class HypeDetector:
         self.notices.clear()
         return notices
 
-    def advance_to(self, now):
-        """Process all 2-second sample boundaries through the given timestamp."""
+    def advance_to(self, now, *, detect=True):
+        """Process sample boundaries through now; optionally build baseline only."""
         completed = []
         now = float(now)
         while self.next_sample <= now:
-            _sample, trigger = self._sample(self.next_sample)
+            _sample, trigger = self._sample(self.next_sample, detect=detect)
             if trigger is not None:
                 completed.append(trigger)
             self.next_sample += SAMPLE_INTERVAL
+        if not detect:
+            self.baseline_primed = True
         return completed
