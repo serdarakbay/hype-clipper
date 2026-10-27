@@ -345,7 +345,7 @@
     chattersLabel.textContent = `${latestChatters} chatters`;
     if (sessionActive) {
       maxSessionChatters = Math.max(maxSessionChatters, latestChatters);
-      if (nextScore > 1.5) timerSeconds = SESSION_SECONDS;
+      if (nextScore >= 1.0) timerSeconds = SESSION_SECONDS;
       else timerSeconds = Math.max(0, timerSeconds - elapsed);
     } else {
       timerSeconds = SESSION_SECONDS;

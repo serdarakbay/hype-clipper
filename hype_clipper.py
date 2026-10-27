@@ -12,7 +12,7 @@ import time
 
 import requests
 
-from detector import HypeDetector, SENSITIVITY_RATIOS, chatter_ratio, tier_for_ratio
+from detector import HypeDetector, SENSITIVITY_RATIOS, chatter_ratio, clip_duration, tier_for_ratio
 import overlay as obs_overlay
 from twitch_auth import TwitchAuth
 
@@ -72,10 +72,10 @@ def send_announcement(owner_id, message, auth):
         print(f"Announcement failed (HTTP {response.status_code}): {response.text}")
 
 
-def create_clip(broadcaster_id, title, auth):
+def create_clip(broadcaster_id, title, duration, auth):
     response = auth.post(
         f"{API}/clips",
-        params={"broadcaster_id": broadcaster_id, "title": title},
+        params={"broadcaster_id": broadcaster_id, "title": title, "duration": duration},
         timeout=30,
     )
     try:
@@ -212,37 +212,38 @@ def main():
     def finish_triggers(triggers):
         for trigger in triggers:
             clip_time = time.time()
+            duration = clip_duration(trigger.trigger_time, clip_time)
             clip_url = None
             clip_error = None
             tier = trigger.tier
             title = f"{tier} moment"
             if not args.dry_run:
                 try:
-                    clip_url, clip_error = create_clip(broadcaster_id, title, auth)
+                    clip_url, clip_error = create_clip(broadcaster_id, title, duration, auth)
                 except requests.RequestException as exc:
                     clip_error = exc.response.text if exc.response is not None else str(exc)
                 if clip_url:
                     session_clips.append({"tier": tier, "url": clip_url})
 
-            if args.announce:
+            if clip_url or args.dry_run:
+                detector.mark_clipped(trigger)
+
+            if args.announce and clip_url:
                 level = {"NICE": 1, "GREAT": 2, "INSANE": 3, "LEGENDARY": 4}[tier]
-                if args.dry_run:
-                    announcement = f"⚡ LEVEL {level} {tier} moment detected (dry run)"
-                elif clip_url:
-                    announcement = f"⚡ LEVEL {level} {tier} moment clipped! {clip_url}"
-                else:
-                    announcement = None
-                if announcement:
-                    try:
-                        send_announcement(owner_id, announcement, auth)
-                    except requests.RequestException as exc:
-                        detail = exc.response.text if exc.response is not None else str(exc)
-                        print(f"Announcement failed: {detail}")
+                announcement = f"⚡ LEVEL {level} {tier} moment clipped! {clip_url}"
+                try:
+                    send_announcement(owner_id, announcement, auth)
+                except requests.RequestException as exc:
+                    detail = exc.response.text if exc.response is not None else str(exc)
+                    print(f"Announcement failed: {detail}")
 
             event = {
                 "title": title,
+                "session_id": trigger.session_id,
+                "upgrade": trigger.upgrade,
                 "trigger_time": iso_time(trigger.trigger_time),
                 "clip_time": iso_time(clip_time),
+                "duration": duration,
                 "peak_rate": trigger.peak_rate,
                 "trigger_median": trigger.trigger_median,
                 "peak_ratio": trigger.peak_ratio,
@@ -254,14 +255,16 @@ def main():
                 event["clip_error"] = clip_error
             with Path(__file__).with_name("clips.jsonl").open("a", encoding="utf-8") as log:
                 log.write(json.dumps(event, ensure_ascii=False) + "\n")
-            if args.overlay:
+            if args.overlay and (clip_url or args.dry_run):
                 obs_overlay.publish({
                     "type": "clip",
                     "title": event["title"],
                     "url": clip_url,
                 })
             print(
-                f"CLIP tier={tier} trigger_time={event['trigger_time']} clip_time={event['clip_time']} "
+                f"CLIP session_id={trigger.session_id} upgrade={str(trigger.upgrade).lower()} "
+                f"tier={tier} trigger_time={event['trigger_time']} clip_time={event['clip_time']} "
+                f"duration={duration:.1f}s "
                 f"peak_rate={trigger.peak_rate:.2f} peak_hype_score={trigger.peak_hype_score:.2f} "
                 f"peak_ratio={trigger.peak_ratio:.2f}x "
                 f"clip_url={clip_url or 'null'}"

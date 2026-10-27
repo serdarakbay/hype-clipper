@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import time
 
-from detector import HypeDetector, PEAK_TIMEOUT, SENSITIVITY_RATIOS
+from detector import HypeDetector, PEAK_HARD_TIMEOUT, SENSITIVITY_RATIOS, WINDOW_SECONDS, clip_duration
 import overlay as obs_overlay
 
 
@@ -49,8 +49,9 @@ def main():
         raise SystemExit(f"File not found: {args.path}")
     messages = read_messages(args.path)
     if not messages:
-        print("Total triggers: 0")
-        print("Triggers per hour: 0.00")
+        print("Total sessions: 0")
+        print("Total clips: 0")
+        print("Clips per hour: 0.00")
         return
 
     started_at = messages[0][0]
@@ -60,11 +61,12 @@ def main():
         min_ratio=SENSITIVITY_RATIOS[args.sensitivity],
     )
     ended_at = messages[-1][0]
-    replay_end = ended_at + PEAK_TIMEOUT
+    replay_end = ended_at + WINDOW_SECONDS + PEAK_HARD_TIMEOUT
     replay_clock = time.monotonic()
     next_message = 0
     next_status = started_at
-    trigger_count = 0
+    session_count = 0
+    clip_count = 0
     while True:
         candidates = [replay_end, detector.next_sample]
         if next_message < len(messages):
@@ -86,6 +88,18 @@ def main():
 
         completed = detector.advance_to(target)
         notices = detector.drain_notices()
+        for notice in notices:
+            if notice["type"] == "session_start":
+                session_count += 1
+                offset = notice["time"] - started_at
+                print(f"SESSION start session_id={notice['session_id']} offset={offset:.1f}s")
+            elif notice["type"] == "session_end":
+                offset = notice["time"] - started_at
+                print(
+                    f"SESSION end session_id={notice['session_id']} offset={offset:.1f}s "
+                    f"max_ratio={notice['max_ratio']:.2f}x "
+                    f"max_tier={notice['max_tier'] or '(none)'}"
+                )
         if args.overlay:
             for notice in notices:
                 obs_overlay.publish(notice)
@@ -100,25 +114,36 @@ def main():
                 next_status += 1
 
         for trigger in completed:
-            trigger_count += 1
+            clip_count += 1
             tier = trigger.tier
             title = f"{tier} moment"
+            detector.mark_clipped(trigger)
             if args.overlay:
                 obs_overlay.publish({"type": "clip", "title": title, "url": None})
-            offset = trigger.trigger_time - started_at
+            wave_start_offset = trigger.trigger_time - started_at
+            clip_offset = trigger.clip_time - started_at
+            duration = clip_duration(trigger.trigger_time, trigger.clip_time)
             print(
-                f"TRIGGER offset={offset:.1f}s tier={tier} "
+                f"CLIP session_id={trigger.session_id} upgrade={str(trigger.upgrade).lower()} "
+                f"wave_start_offset={wave_start_offset:.1f}s clip_offset={clip_offset:.1f}s tier={tier} "
+                f"duration={duration:.1f}s "
                 f"peak_rate={trigger.peak_rate:.2f} "
                 f"peak_ratio={trigger.peak_ratio:.2f}x "
                 f"top_words={','.join(trigger.top_words) or '(none)'}"
             )
-        if target >= replay_end:
+        if target >= replay_end or (
+            next_message >= len(messages)
+            and target >= ended_at + WINDOW_SECONDS
+            and detector.pending is None
+            and not detector.session_active
+        ):
             break
 
     duration = ended_at - started_at
-    per_hour = trigger_count * 3600 / duration if duration > 0 else 0.0
-    print(f"Total triggers: {trigger_count}")
-    print(f"Triggers per hour: {per_hour:.2f}")
+    per_hour = clip_count * 3600 / duration if duration > 0 else 0.0
+    print(f"Total sessions: {session_count}")
+    print(f"Total clips: {clip_count}")
+    print(f"Clips per hour: {per_hour:.2f}")
 
 
 if __name__ == "__main__":
