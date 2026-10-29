@@ -23,7 +23,7 @@ Tiers are NICE, GREAT, INSANE, and LEGENDARY. A session can create up to two cli
 
 ## Features
 
-- Creates Twitch clips titled `⚡ <TIER> #<n> · <game> · <HH:MM>` (with the game omitted when unavailable), adding `(upgrade)` to upgrade tiers. Titles use the current channel category and local clip time; the same title is used in chat announcements. Clips use 20 seconds of pre-roll and `has_delay=true`.
+- Creates Twitch clips titled `⚡ <TIER> #<n> · <game> · <H:MM:SS>` (with the game omitted when unavailable), adding `(upgrade)` to upgrade tiers. Titles use the current channel category and stream uptime from Helix Get Streams; if `started_at` is unavailable, they use local `HH:MM`. The same title is used in chat announcements. Clips use 20 seconds of pre-roll and `has_delay=true`.
 - Serves a transparent OBS overlay.
 - `--announce` posts an announcement in the authenticated user's own channel when a clip is created.
 - `!clips` replies with recent clips from the current run; `!hype` replies with the current level and score. These commands are read from the authenticated user's channel.

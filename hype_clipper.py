@@ -51,10 +51,37 @@ def get_channel_game_name(broadcaster_id, auth):
         return None
 
 
-def make_clip_title(tier, clip_number, game_name, clip_datetime, upgrade=False):
+def get_stream_started_at(broadcaster_id, auth):
+    """Return the monitored live stream's start time as a Unix timestamp."""
+    try:
+        response = auth.get(
+            f"{API}/streams", params={"user_id": broadcaster_id}, timeout=30
+        )
+        response.raise_for_status()
+        streams = response.json().get("data", [])
+        if not streams or not streams[0].get("started_at"):
+            return None
+        started_at = streams[0]["started_at"]
+        return datetime.fromisoformat(started_at.replace("Z", "+00:00")).timestamp()
+    except (requests.RequestException, AttributeError, TypeError, ValueError, OverflowError) as exc:
+        if isinstance(exc, requests.RequestException):
+            detail = exc.response.text if exc.response is not None else str(exc)
+            print(f"Could not look up stream start time; using local time in clip title: {detail}")
+        return None
+
+
+def make_clip_title(
+    tier, clip_number, game_name, clip_datetime, clip_timestamp, stream_started_at=None, upgrade=False
+):
     tier_label = f"{tier} (upgrade)" if upgrade else tier
     prefix = f"⚡ {tier_label} #{clip_number}"
-    clock = clip_datetime.strftime("%H:%M")
+    if stream_started_at is None:
+        clock = clip_datetime.strftime("%H:%M")
+    else:
+        uptime = max(0, int(clip_timestamp - stream_started_at))
+        hours, remainder = divmod(uptime, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        clock = f"{hours}:{minutes:02}:{seconds:02}"
     if not game_name:
         return f"{prefix} · {clock}"
 
@@ -251,6 +278,7 @@ def main():
         for trigger in triggers:
             clip_number += 1
             game_name = get_channel_game_name(broadcaster_id, auth)
+            stream_started_at = get_stream_started_at(broadcaster_id, auth)
             clip_time = time.time()
             clip_datetime = datetime.fromtimestamp(clip_time).astimezone()
             duration = clip_duration(trigger.trigger_time, clip_time)
@@ -258,7 +286,8 @@ def main():
             clip_error = None
             tier = trigger.tier
             title = make_clip_title(
-                tier, clip_number, game_name, clip_datetime, upgrade=trigger.upgrade
+                tier, clip_number, game_name, clip_datetime, clip_time,
+                stream_started_at=stream_started_at, upgrade=trigger.upgrade,
             )
             if not args.dry_run:
                 try:
