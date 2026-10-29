@@ -23,14 +23,54 @@ UPGRADE_MIN_STEPS = 2
 PRE_ROLL_SECONDS = 20.0
 MIN_CLIP_DURATION = 5.0
 MAX_CLIP_DURATION = 60.0
+MIN_TYPE_MESSAGE_RATIO = 0.10
+MIN_TYPE_MESSAGES = 3
 RELATIVE_MAD_FLOOR = 0.1
 ABSOLUTE_MAD_FLOOR = 1.0
 SESSION_END_SCORE = 1.0
 BOT_USERS = frozenset({"nightbot", "streamelements", "fossabot", "moobot", "streamlabs"})
 TIER_RATIO_THRESHOLDS = ((2.0, "NICE"), (3.0, "GREAT"), (4.0, "INSANE"), (6.0, "LEGENDARY"))
 SENSITIVITY_RATIOS = {"low": 3.0, "medium": 2.5, "high": 2.0}
-
-
+MOMENT_TYPE_PATTERNS = {
+    "FUNNY": (
+        re.compile(r"\bkekw\b", re.IGNORECASE),
+        re.compile(r"\blulw?\b", re.IGNORECASE),
+        re.compile(r"\bomegalul\b", re.IGNORECASE),
+        re.compile(r"\bicant\b", re.IGNORECASE),
+        re.compile(r"\blm+f*a+o+\b", re.IGNORECASE),
+        re.compile(r"\bxd+\b", re.IGNORECASE),
+        re.compile(r"\blol+\b", re.IGNORECASE),
+        re.compile(r"(ha){2,}", re.IGNORECASE),
+        re.compile(r"(he){2,}", re.IGNORECASE),
+        re.compile(r"(ja){2,}", re.IGNORECASE),
+        re.compile(r"\bk{4,}\b", re.IGNORECASE),
+        re.compile(r"\bw{3,}\b", re.IGNORECASE),
+        re.compile(r"\bmdr\b", re.IGNORECASE),
+        re.compile(r"(ха){2,}", re.IGNORECASE),
+        re.compile(r"ахах+", re.IGNORECASE),
+        re.compile(r"(xa){2,}", re.IGNORECASE),
+        re.compile(r"ㅋ{3,}", re.IGNORECASE),
+        re.compile(r"哈{2,}", re.IGNORECASE),
+        re.compile(r"😂|🤣|💀", re.IGNORECASE),
+        re.compile(r"\b(?P<mash>[asdfghjklşi]{6,})\b", re.IGNORECASE),
+    ),
+    "HYPE": (
+        re.compile(r"\bpog\w*\b", re.IGNORECASE),
+        re.compile(r"\bpoggers\b", re.IGNORECASE),
+        re.compile(r"\blets+\s?go+\b", re.IGNORECASE),
+        re.compile(r"\bez\b", re.IGNORECASE),
+        re.compile(r"🔥", re.IGNORECASE),
+        re.compile(r"\bgoal\b", re.IGNORECASE),
+    ),
+    "SHOCK": (
+        re.compile(r"\bmonkas\b", re.IGNORECASE),
+        re.compile(r"\bwtf\b", re.IGNORECASE),
+        re.compile(r"\bD:", re.IGNORECASE),
+        re.compile(r"\bno\s?way\b", re.IGNORECASE),
+        re.compile(r"\bwaytoodank\b", re.IGNORECASE),
+        re.compile(r"😱|😳", re.IGNORECASE),
+    ),
+}
 def chatter_ratio(unique_chatters, median):
     """Return an activity ratio; a zero baseline has no meaningful ratio."""
     return unique_chatters / median if median > 0 else 0.0
@@ -56,6 +96,48 @@ def top_words(messages):
     for _ts, _user, text in messages:
         counts.update(re.findall(r"[^\W_]+(?:'[^\W_]+)*", text.casefold(), flags=re.UNICODE))
     return [word for word, _count in counts.most_common(3)]
+
+
+def message_matches_moment_group(text, group):
+    for pattern in MOMENT_TYPE_PATTERNS[group]:
+        for match in pattern.finditer(text):
+            if "mash" in pattern.groupindex:
+                mash = match.group("mash").casefold()
+                vowel_count = sum(character in "ai" for character in mash)
+                minimum_distinct = 2 if vowel_count == 0 else 3
+                if (
+                    len(set(mash)) < minimum_distinct
+                    or vowel_count / len(mash) > 0.40
+                ):
+                    continue
+            return True
+    return False
+
+
+def moment_group_counts(messages):
+    """Count each eligible message at most once in every matching group."""
+    counts = {group: 0 for group in MOMENT_TYPE_PATTERNS}
+    for _ts, _user, text in messages:
+        for group in MOMENT_TYPE_PATTERNS:
+            if message_matches_moment_group(text, group):
+                counts[group] += 1
+    return counts
+
+
+def classify_moment(counts, window_message_count):
+    winning_count = max(counts.values(), default=0)
+    if (
+        winning_count < MIN_TYPE_MESSAGES
+        or not window_message_count
+        or winning_count / window_message_count < MIN_TYPE_MESSAGE_RATIO
+    ):
+        return "HYPE"
+    return max(MOMENT_TYPE_PATTERNS, key=lambda group: counts[group])
+
+
+def format_moment_counts(counts):
+    ordered = sorted(MOMENT_TYPE_PATTERNS, key=lambda group: -counts.get(group, 0))
+    return ",".join(f"{group}:{counts.get(group, 0)}" for group in ordered)
 
 
 @dataclass(frozen=True)
@@ -86,6 +168,11 @@ class Trigger:
     peak_hype_score: float
     top_words: list
     tier: str
+    moment_type: str
+    type_counts: dict
+    window_message_count: int
+    top_repeated_message: str
+    top_repeated_count: int
     session_id: str
     upgrade: bool
 
@@ -99,6 +186,7 @@ class HypeDetector:
         self.min_ratio = max(float(min_ratio), TIER_RATIO_THRESHOLDS[0][0])
         self.next_sample = self.start_time
         self.messages = deque()  # (unix timestamp, user, text)
+        self.message_history = deque()  # Eligible chat retained for full clip windows.
         self.baseline = deque()  # (timestamp, unique chatters in the 10-second window)
         self.baseline_primed = False
         self.rate_samples = deque(maxlen=PEAK_SMOOTHING_SAMPLES)
@@ -122,9 +210,14 @@ class HypeDetector:
         """Add a timestamped message. Call advance_to() to process due samples."""
         if text.startswith("!") or user.casefold() in BOT_USERS:
             return
-        self.messages.append((float(ts), user, text))
+        row = (float(ts), user, text)
+        self.messages.append(row)
+        self.message_history.append(row)
 
     def _sample(self, now, detect=True):
+        history_cutoff = now - MAX_CLIP_DURATION
+        while self.message_history and self.message_history[0][0] < history_cutoff:
+            self.message_history.popleft()
         cutoff = now - WINDOW_SECONDS
         while self.messages and self.messages[0][0] <= cutoff:
             self.messages.popleft()
@@ -271,6 +364,16 @@ class HypeDetector:
             if fell_from_peak or timed_out or hard_timed_out:
                 clipped_tier = self.clipped_tier_by_session.get(pending["session_id"])
                 best_rank = self._tier_rank(clipped_tier) if clipped_tier else -1
+                clip_length = clip_duration(pending["trigger_time"], now)
+                classification_start = now - clip_length
+                clip_messages = [
+                    row for row in self.message_history
+                    if classification_start <= row[0] <= now
+                ]
+                type_counts = moment_group_counts(clip_messages)
+                moment_type = classify_moment(type_counts, len(clip_messages))
+                repeated = Counter(row[2] for row in clip_messages).most_common(1)
+                top_repeated_message, top_repeated_count = repeated[0] if repeated else ("", 0)
                 trigger = Trigger(
                     trigger_time=pending["trigger_time"],
                     clip_time=now,
@@ -280,6 +383,11 @@ class HypeDetector:
                     peak_hype_score=pending["peak_hype_score"],
                     top_words=pending["top_words"],
                     tier=pending["tier"],
+                    moment_type=moment_type,
+                    type_counts=dict(type_counts),
+                    window_message_count=len(clip_messages),
+                    top_repeated_message=top_repeated_message,
+                    top_repeated_count=top_repeated_count,
                     session_id=pending["session_id"],
                     upgrade=clipped_tier is not None,
                 )

@@ -5,7 +5,14 @@ import json
 from pathlib import Path
 import time
 
-from detector import HypeDetector, PEAK_HARD_TIMEOUT, SENSITIVITY_RATIOS, WINDOW_SECONDS, clip_duration
+from detector import (
+    HypeDetector,
+    PEAK_HARD_TIMEOUT,
+    SENSITIVITY_RATIOS,
+    WINDOW_SECONDS,
+    clip_duration,
+    format_moment_counts,
+)
 import overlay as obs_overlay
 
 
@@ -130,13 +137,22 @@ def main():
             title = f"{tier} moment"
             detector.mark_clipped(trigger)
             if args.overlay:
-                obs_overlay.publish({"type": "clip", "title": title, "url": None})
+                obs_overlay.publish({
+                    "type": "clip", "title": title, "url": None,
+                    "moment_type": trigger.moment_type,
+                    "type_counts": trigger.type_counts,
+                })
             wave_start_offset = trigger.trigger_time - started_at
             clip_offset = trigger.clip_time - started_at
             duration = clip_duration(trigger.trigger_time, trigger.clip_time)
             print(
                 f"CLIP session_id={trigger.session_id} upgrade={str(trigger.upgrade).lower()} "
-                f"wave_start_offset={wave_start_offset:.1f}s clip_offset={clip_offset:.1f}s tier={tier} "
+                f"wave_start_offset={wave_start_offset:.1f}s clip_offset={clip_offset:.1f}s "
+                f"tier={tier} moment_type={trigger.moment_type} "
+                f"type_counts={format_moment_counts(trigger.type_counts)} "
+                f"window_messages={trigger.window_message_count} "
+                f"top_repeated_count={trigger.top_repeated_count} "
+                f"top_repeated_message={json.dumps(trigger.top_repeated_message, ensure_ascii=False)} "
                 f"duration={duration:.1f}s "
                 f"peak_rate={trigger.peak_rate:.2f} "
                 f"peak_ratio={trigger.peak_ratio:.2f}x "

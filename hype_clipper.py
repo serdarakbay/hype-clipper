@@ -12,7 +12,14 @@ import time
 
 import requests
 
-from detector import HypeDetector, SENSITIVITY_RATIOS, chatter_ratio, clip_duration, tier_for_ratio
+from detector import (
+    HypeDetector,
+    SENSITIVITY_RATIOS,
+    chatter_ratio,
+    clip_duration,
+    format_moment_counts,
+    tier_for_ratio,
+)
 import overlay as obs_overlay
 from twitch_auth import TwitchAuth
 
@@ -295,13 +302,15 @@ def main():
                 except requests.RequestException as exc:
                     clip_error = exc.response.text if exc.response is not None else str(exc)
                 if clip_url:
-                    session_clips.append({"tier": tier, "url": clip_url})
+                    session_clips.append({
+                        "tier": tier, "moment_type": trigger.moment_type, "url": clip_url,
+                    })
 
             if clip_url or args.dry_run:
                 detector.mark_clipped(trigger)
 
             if args.announce and clip_url:
-                announcement = f"{title} {clip_url}"
+                announcement = f"{title} · {trigger.moment_type} {clip_url}"
                 try:
                     send_announcement(owner_id, announcement, auth)
                 except requests.RequestException as exc:
@@ -315,6 +324,11 @@ def main():
                 "trigger_time": iso_time(trigger.trigger_time),
                 "clip_time": iso_time(clip_time),
                 "duration": duration,
+                "moment_type": trigger.moment_type,
+                "type_counts": trigger.type_counts,
+                "window_message_count": trigger.window_message_count,
+                "top_repeated_message": trigger.top_repeated_message,
+                "top_repeated_count": trigger.top_repeated_count,
                 "peak_rate": trigger.peak_rate,
                 "trigger_median": trigger.trigger_median,
                 "peak_ratio": trigger.peak_ratio,
@@ -331,10 +345,17 @@ def main():
                     "type": "clip",
                     "title": event["title"],
                     "url": clip_url,
+                    "moment_type": trigger.moment_type,
+                    "type_counts": trigger.type_counts,
                 })
             print(
                 f"CLIP session_id={trigger.session_id} upgrade={str(trigger.upgrade).lower()} "
-                f"tier={tier} trigger_time={event['trigger_time']} clip_time={event['clip_time']} "
+                f"tier={tier} moment_type={trigger.moment_type} "
+                f"type_counts={format_moment_counts(trigger.type_counts)} "
+                f"window_messages={trigger.window_message_count} "
+                f"top_repeated_count={trigger.top_repeated_count} "
+                f"top_repeated_message={json.dumps(trigger.top_repeated_message, ensure_ascii=False)} "
+                f"trigger_time={event['trigger_time']} clip_time={event['clip_time']} "
                 f"duration={duration:.1f}s "
                 f"peak_rate={trigger.peak_rate:.2f} peak_hype_score={trigger.peak_hype_score:.2f} "
                 f"peak_ratio={trigger.peak_ratio:.2f}x "
@@ -355,7 +376,9 @@ def main():
 
         if key == "clips":
             recent = list(reversed(session_clips[-3:]))
-            reply = " | ".join(f"{clip['tier']} {clip['url']}" for clip in recent) if recent else "No clips yet"
+            reply = " | ".join(
+                f"{clip['tier']} {clip['moment_type']} {clip['url']}" for clip in recent
+            ) if recent else "No clips yet"
         else:
             sample = detector.latest
             ratio = chatter_ratio(sample.unique_chatters, sample.median)
