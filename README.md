@@ -19,11 +19,11 @@ Twitch chat -> unique chatter activity -> baseline and hype score
             -> session and tier -> wait for wave peak -> clip
 ```
 
-Tiers are NICE, GREAT, INSANE, and LEGENDARY. A session can create up to two clips: its first clip and at most one upgrade, which requires a tier at least two steps above the best tier already clipped. Peak waiting uses a 3-sample smoothed rate and clips after a 70% drop or at most 8 seconds without a new peak, with a 60-second hard cap. Clip duration is the time from wave start to the Create Clip call plus 20 seconds of pre-roll, clamped to Twitch's 5-60 second range; the computed duration is logged for each clip.
+Tiers are NICE, GREAT, INSANE, and LEGENDARY. A session can create up to two clips: its first clip and at most one upgrade, which requires a tier at least two steps above the best tier already clipped. Peak waiting uses a 3-sample smoothed rate and clips after a 70% drop or at most 8 seconds without a new peak, with a 60-second hard cap. Clip duration is the time from wave start to the Create Clip call plus 20 seconds of pre-roll, clamped to Twitch's 5-60 second range; the computed duration is logged for each clip. Clips are created with has_delay enabled, so Twitch captures them as viewers saw the stream, including the broadcaster's stream delay.
 
 ## Features
 
-- Creates Twitch clips with a tier-based title and 20 seconds of pre-roll, clamped to Twitch's 5-60 second range.
+- Creates Twitch clips with a tier-based title, 20 seconds of pre-roll and has_delay, so the clip contains the moment viewers reacted to.
 - Serves a transparent OBS overlay.
 - `--announce` posts an announcement in the authenticated user's own channel when a clip is created.
 - `!clips` replies with recent clips from the current run; `!hype` replies with the current level and score. These commands are read from the authenticated user's channel.
@@ -33,9 +33,9 @@ Tiers are NICE, GREAT, INSANE, and LEGENDARY. A session can create up to two cli
 
 ## Results
 
-On a recorded 77-minute Jynxzi stream (Rainbow Six Siege, about 30,000 viewers): 6 hype sessions, 7 clips, 5.5 clips per hour, and one NICE -> LEGENDARY upgrade.
+On a recorded 77-minute Jynxzi stream (Rainbow Six Siege, about 30,000 viewers): 6 hype sessions, 7 clips, 5.5 clips per hour, and one NICE -> INSANE upgrade.
 
-Accuracy: <X> of 6 sessions matched a real moment
+Live test on PGL (CS2) after timing fixes: 3 of 3 clips contained the moment.
 
 ## Setup
 
@@ -60,10 +60,10 @@ Watch a channel and create clips:
 python hype_clipper.py <channel> [--dry-run] [--record] [--overlay] [--announce] [--sensitivity low|medium|high]
 ```
 
-For example:
+For example, on your own channel:
 
 ```sh
-python hype_clipper.py jynxzi --record --overlay --sensitivity medium
+python hype_clipper.py your_channel --overlay --announce
 ```
 
 `--record` writes chat messages to `data/chat_<channel>_<YYYYMMDD_HHMM>.jsonl`. `--sensitivity` defaults to `medium`; `low` requires a 3.0x chatter ratio, `medium` 2.5x, and `high` 2.0x. All modes keep the default hype-score threshold of 3.0.
@@ -95,6 +95,7 @@ The entire codebase was written through OpenAI Codex in VS Code, task by task, w
 - Wrote the shared detector and replay tool, so algorithm changes could be tested against the same recorded streams.
 - Added hype sessions and tier upgrades after replay results showed separate triggers for one long moment.
 - Diagnosed and fixed real bugs found during testing: expired tokens (401) with automatic refresh, and a background flush error that stopped recording.
+- Fixed clip timing after live tests showed clips missing the moment: added a 20-second pre-roll and enabled has_delay so clips match what viewers saw.
 - Built the OBS overlay, chat announcements and chat commands.
 
 The commit history shows the project being built during the hackathon period.
@@ -104,4 +105,5 @@ The commit history shows the project being built during the hackathon period.
 - Chat activity is only a proxy for an interesting gameplay moment; a spike can miss a moment or fire on unrelated chat activity.
 - Twitch must allow clips for the monitored channel, and the channel must be live. The clip duration parameter is limited to 60 seconds.
 - The overlay server listens on localhost, so it is intended for a Browser Source on the same computer.
-- Evaluate more recordings and fill in the accuracy result above; thresholds may need tuning for different channels.
+- Clips include 20 seconds of pre-roll because chat reacts 5-15 seconds after the event. The moment is inside the clip, but the end can contain chat-reaction time with less action.
+- The live accuracy test is small (3 clips on one channel); thresholds may need tuning for different channels and stream sizes.
