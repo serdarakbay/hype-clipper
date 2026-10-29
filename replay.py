@@ -1,6 +1,7 @@
 """Replay a recorded Twitch chat JSONL file through the shared hype detector."""
 
 import argparse
+from datetime import datetime
 import json
 from pathlib import Path
 import time
@@ -14,6 +15,7 @@ from detector import (
     format_moment_counts,
 )
 import overlay as obs_overlay
+from clip_titles import make_clip_title
 
 
 def read_messages(path):
@@ -134,7 +136,16 @@ def main():
         for trigger in completed:
             clip_count += 1
             tier = trigger.tier
-            title = f"{tier} moment"
+            clip_datetime = datetime.fromtimestamp(trigger.clip_time).astimezone()
+            title = make_clip_title(
+                tier,
+                clip_count,
+                game_name=None,
+                clip_datetime=clip_datetime,
+                clip_timestamp=trigger.clip_time,
+                upgrade=trigger.upgrade,
+                moment_type=trigger.moment_type,
+            )
             detector.mark_clipped(trigger)
             if args.overlay:
                 obs_overlay.publish({
@@ -149,6 +160,7 @@ def main():
                 f"CLIP session_id={trigger.session_id} upgrade={str(trigger.upgrade).lower()} "
                 f"wave_start_offset={wave_start_offset:.1f}s clip_offset={clip_offset:.1f}s "
                 f"tier={tier} moment_type={trigger.moment_type} "
+                f"title={json.dumps(title, ensure_ascii=False)} "
                 f"type_counts={format_moment_counts(trigger.type_counts)} "
                 f"window_messages={trigger.window_message_count} "
                 f"top_repeated_count={trigger.top_repeated_count} "

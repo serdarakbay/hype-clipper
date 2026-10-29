@@ -20,6 +20,7 @@ from detector import (
     format_moment_counts,
     tier_for_ratio,
 )
+from clip_titles import make_clip_title
 import overlay as obs_overlay
 from twitch_auth import TwitchAuth
 
@@ -75,32 +76,6 @@ def get_stream_started_at(broadcaster_id, auth):
             detail = exc.response.text if exc.response is not None else str(exc)
             print(f"Could not look up stream start time; using local time in clip title: {detail}")
         return None
-
-
-def make_clip_title(
-    tier, clip_number, game_name, clip_datetime, clip_timestamp, stream_started_at=None, upgrade=False
-):
-    tier_label = f"{tier} (upgrade)" if upgrade else tier
-    prefix = f"⚡ {tier_label} #{clip_number}"
-    if stream_started_at is None:
-        clock = clip_datetime.strftime("%H:%M")
-    else:
-        uptime = max(0, int(clip_timestamp - stream_started_at))
-        hours, remainder = divmod(uptime, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        clock = f"{hours}:{minutes:02}:{seconds:02}"
-    if not game_name:
-        return f"{prefix} · {clock}"
-
-    separator = f"{prefix} · "
-    suffix = f" · {clock}"
-    game_limit = max(0, 100 - len(separator) - len(suffix))
-    if game_limit == 0:
-        return f"{prefix} · {clock}"
-    game = game_name.strip()
-    if len(game) > game_limit:
-        game = game[:game_limit - 1] + "…"
-    return f"{separator}{game}{suffix}"
 
 
 def get_authenticated_user(auth):
@@ -295,6 +270,7 @@ def main():
             title = make_clip_title(
                 tier, clip_number, game_name, clip_datetime, clip_time,
                 stream_started_at=stream_started_at, upgrade=trigger.upgrade,
+                moment_type=trigger.moment_type,
             )
             if not args.dry_run:
                 try:
@@ -303,14 +279,15 @@ def main():
                     clip_error = exc.response.text if exc.response is not None else str(exc)
                 if clip_url:
                     session_clips.append({
-                        "tier": tier, "moment_type": trigger.moment_type, "url": clip_url,
+                        "tier": tier, "moment_type": trigger.moment_type,
+                        "title": title, "url": clip_url,
                     })
 
             if clip_url or args.dry_run:
                 detector.mark_clipped(trigger)
 
             if args.announce and clip_url:
-                announcement = f"{title} · {trigger.moment_type} {clip_url}"
+                announcement = f"{title} {clip_url}"
                 try:
                     send_announcement(owner_id, announcement, auth)
                 except requests.RequestException as exc:
@@ -351,6 +328,7 @@ def main():
             print(
                 f"CLIP session_id={trigger.session_id} upgrade={str(trigger.upgrade).lower()} "
                 f"tier={tier} moment_type={trigger.moment_type} "
+                f"title={json.dumps(title, ensure_ascii=False)} "
                 f"type_counts={format_moment_counts(trigger.type_counts)} "
                 f"window_messages={trigger.window_message_count} "
                 f"top_repeated_count={trigger.top_repeated_count} "
@@ -377,7 +355,7 @@ def main():
         if key == "clips":
             recent = list(reversed(session_clips[-3:]))
             reply = " | ".join(
-                f"{clip['tier']} {clip['moment_type']} {clip['url']}" for clip in recent
+                f"{clip['title']} {clip['url']}" for clip in recent
             ) if recent else "No clips yet"
         else:
             sample = detector.latest
