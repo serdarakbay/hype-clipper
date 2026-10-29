@@ -23,7 +23,7 @@ Tiers are NICE, GREAT, INSANE, and LEGENDARY. A session can create up to two cli
 
 ## Features
 
-- Creates Twitch clips with a tier-based title, 20 seconds of pre-roll and has_delay, so the clip contains the moment viewers reacted to.
+- Creates Twitch clips titled `⚡ <TIER> #<n> · <game> · <HH:MM>` (with the game omitted when unavailable), adding `(upgrade)` to upgrade tiers. Titles use the current channel category and local clip time; the same title is used in chat announcements. Clips use 20 seconds of pre-roll and `has_delay=true`.
 - Serves a transparent OBS overlay.
 - `--announce` posts an announcement in the authenticated user's own channel when a clip is created.
 - `!clips` replies with recent clips from the current run; `!hype` replies with the current level and score. These commands are read from the authenticated user's channel.

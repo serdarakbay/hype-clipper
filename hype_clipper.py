@@ -34,6 +34,41 @@ def get_broadcaster_id(channel, auth):
     return users[0]["id"]
 
 
+def get_channel_game_name(broadcaster_id, auth):
+    """Return the monitored channel's current game name, if Helix provides it."""
+    try:
+        response = auth.get(
+            f"{API}/channels", params={"broadcaster_id": broadcaster_id}, timeout=30
+        )
+        response.raise_for_status()
+        channels = response.json().get("data", [])
+        if not channels:
+            return None
+        return (channels[0].get("game_name") or "").strip() or None
+    except requests.RequestException as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        print(f"Could not look up channel category; omitting it from clip title: {detail}")
+        return None
+
+
+def make_clip_title(tier, clip_number, game_name, clip_datetime, upgrade=False):
+    tier_label = f"{tier} (upgrade)" if upgrade else tier
+    prefix = f"⚡ {tier_label} #{clip_number}"
+    clock = clip_datetime.strftime("%H:%M")
+    if not game_name:
+        return f"{prefix} · {clock}"
+
+    separator = f"{prefix} · "
+    suffix = f" · {clock}"
+    game_limit = max(0, 100 - len(separator) - len(suffix))
+    if game_limit == 0:
+        return f"{prefix} · {clock}"
+    game = game_name.strip()
+    if len(game) > game_limit:
+        game = game[:game_limit - 1] + "…"
+    return f"{separator}{game}{suffix}"
+
+
 def get_authenticated_user(auth):
     """Get the channel owner represented by the saved user access token."""
     response = auth.get(f"{API}/users", timeout=30)
@@ -158,13 +193,11 @@ def main():
     owner_id = owner["id"]
     owner_login = owner["login"].casefold()
 
-    broadcaster_id = None
-    if not args.dry_run:
-        try:
-            broadcaster_id = get_broadcaster_id(channel, auth)
-        except requests.RequestException as exc:
-            detail = exc.response.text if exc.response is not None else str(exc)
-            raise SystemExit(f"Could not look up channel: {detail}") from exc
+    try:
+        broadcaster_id = get_broadcaster_id(channel, auth)
+    except requests.RequestException as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        raise SystemExit(f"Could not look up channel: {detail}") from exc
 
     record_file = None
     last_record_flush = time.monotonic()
@@ -190,6 +223,7 @@ def main():
     session_clips = []
     last_command_reply = {"clips": float("-inf"), "hype": float("-inf")}
     next_status = started_at + STATUS_INTERVAL
+    clip_number = 0
     stop_status = threading.Event()
     status_thread = None
     pending = ""
@@ -213,13 +247,19 @@ def main():
         status_thread.start()
 
     def finish_triggers(triggers):
+        nonlocal clip_number
         for trigger in triggers:
+            clip_number += 1
+            game_name = get_channel_game_name(broadcaster_id, auth)
             clip_time = time.time()
+            clip_datetime = datetime.fromtimestamp(clip_time).astimezone()
             duration = clip_duration(trigger.trigger_time, clip_time)
             clip_url = None
             clip_error = None
             tier = trigger.tier
-            title = f"{tier} moment"
+            title = make_clip_title(
+                tier, clip_number, game_name, clip_datetime, upgrade=trigger.upgrade
+            )
             if not args.dry_run:
                 try:
                     clip_url, clip_error = create_clip(broadcaster_id, title, duration, auth)
@@ -232,8 +272,7 @@ def main():
                 detector.mark_clipped(trigger)
 
             if args.announce and clip_url:
-                level = {"NICE": 1, "GREAT": 2, "INSANE": 3, "LEGENDARY": 4}[tier]
-                announcement = f"⚡ LEVEL {level} {tier} moment clipped! {clip_url}"
+                announcement = f"{title} {clip_url}"
                 try:
                     send_announcement(owner_id, announcement, auth)
                 except requests.RequestException as exc:
