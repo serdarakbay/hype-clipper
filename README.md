@@ -35,7 +35,7 @@ Tiers are NICE, GREAT, INSANE, and LEGENDARY. A session can create up to two cli
 
 On a recorded 77-minute Jynxzi stream (Rainbow Six Siege, about 30,000 viewers): 6 hype sessions, 7 clips, 5.5 clips per hour, and one NICE -> INSANE upgrade.
 
-Live test on PGL (CS2) after timing fixes: 3 of 3 clips contained the moment.
+Live test on PGL (CS2) after timing fixes: 4 of 4 clips contained the moment.
 
 ## Setup
 
@@ -106,4 +106,4 @@ The commit history shows the project being built during the hackathon period.
 - Twitch must allow clips for the monitored channel, and the channel must be live. The clip duration parameter is limited to 60 seconds.
 - The overlay server listens on localhost, so it is intended for a Browser Source on the same computer.
 - Clips include 20 seconds of pre-roll because chat reacts 5-15 seconds after the event. The moment is inside the clip, but the end can contain chat-reaction time with less action.
-- The live accuracy test is small (3 clips on one channel); thresholds may need tuning for different channels and stream sizes.
+- The live accuracy test is small (4 clips on one channel); thresholds may need tuning for different channels and stream sizes.
