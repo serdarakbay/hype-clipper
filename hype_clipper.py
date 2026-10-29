@@ -75,7 +75,12 @@ def send_announcement(owner_id, message, auth):
 def create_clip(broadcaster_id, title, duration, auth):
     response = auth.post(
         f"{API}/clips",
-        params={"broadcaster_id": broadcaster_id, "title": title, "duration": duration},
+        params={
+            "broadcaster_id": broadcaster_id,
+            "title": title,
+            "duration": duration,
+            "has_delay": "true",
+        },
         timeout=30,
     )
     try:

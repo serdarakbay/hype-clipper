@@ -28,7 +28,7 @@ def main():
             return
         clip_response = auth.post(
             f"{API}/clips",
-            params={"broadcaster_id": users[0]["id"]},
+            params={"broadcaster_id": users[0]["id"], "has_delay": "true"},
             timeout=30,
         )
         try:
