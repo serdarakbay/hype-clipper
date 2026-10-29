@@ -19,11 +19,11 @@ Twitch chat -> unique chatter activity -> baseline and hype score
             -> session and tier -> wait for wave peak -> clip
 ```
 
-Tiers are NICE, GREAT, INSANE, and LEGENDARY. A session can create up to two clips: its first clip and at most one upgrade, which requires a tier at least two steps above the best tier already clipped. Peak waiting uses a 3-sample smoothed rate, waits for a 70% drop or 20 seconds without a new peak, and has a 60-second hard cap.
+Tiers are NICE, GREAT, INSANE, and LEGENDARY. A session can create up to two clips: its first clip and at most one upgrade, which requires a tier at least two steps above the best tier already clipped. Peak waiting uses a 3-sample smoothed rate and clips after a 70% drop or at most 8 seconds without a new peak, with a 60-second hard cap. Clip duration is the time from wave start to the Create Clip call plus 20 seconds of pre-roll, clamped to Twitch's 5-60 second range; the computed duration is logged for each clip.
 
 ## Features
 
-- Creates Twitch clips with a tier-based title and a duration based on the wave length, clamped to Twitch's 5-60 second range.
+- Creates Twitch clips with a tier-based title and 20 seconds of pre-roll, clamped to Twitch's 5-60 second range.
 - Serves a transparent OBS overlay.
 - `--announce` posts an announcement in the authenticated user's own channel when a clip is created.
 - `!clips` replies with recent clips from the current run; `!hype` replies with the current level and score. These commands are read from the authenticated user's channel.

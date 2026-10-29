@@ -16,11 +16,11 @@ TRIGGER_COOLDOWN = 90
 PEAK_DROP_RATIO = 0.70
 PEAK_SMOOTHING_SAMPLES = 3
 SESSION_TIMEOUT = 20
-PEAK_TIMEOUT = SESSION_TIMEOUT
+PEAK_TIMEOUT = 8
 PEAK_HARD_TIMEOUT = 60
 MAX_CLIPS_PER_SESSION = 2
 UPGRADE_MIN_STEPS = 2
-CLIP_PRE_ROLL_SECONDS = 10.0
+PRE_ROLL_SECONDS = 20.0
 MIN_CLIP_DURATION = 5.0
 MAX_CLIP_DURATION = 60.0
 RELATIVE_MAD_FLOOR = 0.1
@@ -46,7 +46,7 @@ def tier_for_ratio(ratio):
 
 def clip_duration(wave_start, clip_time):
     """Return requested wave length plus pre-roll, clamped to Twitch limits."""
-    requested = float(clip_time) - float(wave_start) + CLIP_PRE_ROLL_SECONDS
+    requested = float(clip_time) - float(wave_start) + PRE_ROLL_SECONDS
     return round(max(MIN_CLIP_DURATION, min(MAX_CLIP_DURATION, requested)), 1)
 
 
