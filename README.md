@@ -2,10 +2,6 @@
 
 A Twitch chat hype detector that auto-clips the best moments of a stream.
 
-## Demo
-
-Demo video: <link>
-
 ## The problem
 
 Streamers are busy playing and can miss their best moments. Finding and clipping those moments manually takes attention away from the stream.
