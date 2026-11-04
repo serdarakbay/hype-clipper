@@ -37,7 +37,7 @@ Each clip also gets a moment type, separate from its tier, using regex patterns 
 
 On a recorded 77-minute Jynxzi stream (Rainbow Six Siege, about 30,000 viewers): 6 hype sessions, 7 clips, 5.5 clips per hour, and one NICE -> INSANE upgrade.
 
-Live test on PGL (CS2) after timing fixes: 4 of 4 clips contained the moment.
+Live tests after timing fixes across 4 channels (PGL and ESLCS for CS2 esports, RavshanN and rayasianboy for IRL): 15 of 16 clips contained the moment chat reacted to. Moment type was correct in 7 of 8 clearly classifiable clips. The upgrade mechanism fired live 3 times (e.g. NICE -> INSANE, NICE -> LEGENDARY).
 
 Current replay across all 6 recordings in `data/`: 5 FUNNY, 25 HYPE, and 0 SHOCK clips (30 total).
 
@@ -112,4 +112,7 @@ The commit history shows the project being built during the hackathon period.
 - Twitch must allow clips for the monitored channel, and the channel must be live. The clip duration parameter is limited to 60 seconds.
 - The overlay server listens on localhost, so it is intended for a Browser Source on the same computer.
 - Clips include 20 seconds of pre-roll because chat reacts 5-15 seconds after the event. The moment is inside the clip, but the end can contain chat-reaction time with less action.
-- The live accuracy test is small (4 clips on one channel); thresholds may need tuning for different channels and stream sizes.
+- The live accuracy test covers 16 clips on 4 channels; thresholds may still need tuning for different channels and stream sizes.
+- Chat asking the streamer the same question in bulk can trigger a session with no real event (1 false positive in live tests).
+- At very low baselines, farewell spam ("bye") can be labeled FUNNY.
+- Mixed reactions (laughing and "wtf" together) fall back to HYPE when no single group passes the 10% threshold.
